@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly VERSION="0.1.0"
+readonly DEFAULT_CONFIG_BASE="${XDG_CONFIG_HOME:-$HOME/.config}/copilot-with-profiles"
+readonly DEFAULT_PROFILES_DIR="$DEFAULT_CONFIG_BASE/profiles"
+readonly GLOBAL_CONFIG="$DEFAULT_CONFIG_BASE/config.toml"
+readonly MARKER_FILE=".copilot-profile"
+
+# --- TOML helpers ---
+
+# Extract a value for a given key from a TOML file.
+# Usage: parse_toml_value <file> <key>
+# Handles: key = "value", key = 'value', key = bare_value
+parse_toml_value() {
+    local file="$1" key="$2"
+    if [[ ! -f "$file" ]]; then
+        return 1
+    fi
+    sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p; s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p; s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p" "$file" | head -n1
+}
+
+# --- Config ---
+
+resolve_profiles_dir() {
+    local dir
+    if [[ -f "$GLOBAL_CONFIG" ]]; then
+        dir=$(parse_toml_value "$GLOBAL_CONFIG" "profiles_dir")
+        if [[ -n "${dir:-}" ]]; then
+            # Expand ~ at the start
+            dir="${dir/#\~/$HOME}"
+            echo "$dir"
+            return
+        fi
+    fi
+    echo "$DEFAULT_PROFILES_DIR"
+}
+
+# --- Profile lookup ---
+
+# Walk up from $PWD to / looking for .copilot-profile
+find_marker() {
+    local dir="$PWD"
+    while true; do
+        if [[ -f "$dir/$MARKER_FILE" ]]; then
+            echo "$dir/$MARKER_FILE"
+            return 0
+        fi
+        if [[ "$dir" == "/" ]]; then
+            return 1
+        fi
+        dir="$(dirname "$dir")"
+    done
+}
+
+# --- Subcommands ---
+
+cmd_init() {
+    local profile_name="${1:-}"
+    if [[ -z "$profile_name" ]]; then
+        echo "Usage: cwp init <profile-name>" >&2
+        exit 1
+    fi
+
+    local profiles_dir
+    profiles_dir="$(resolve_profiles_dir)"
+    local profile_dir="$profiles_dir/$profile_name"
+
+    if [[ -d "$profile_dir" ]]; then
+        echo "Profile '$profile_name' already exists at: $profile_dir" >&2
+        exit 1
+    fi
+
+    mkdir -p "$profile_dir"
+    echo "Created profile '$profile_name' at: $profile_dir"
+    echo "Copilot will generate default config files on first run."
+}
+
+cmd_version() {
+    echo "cwp $VERSION"
+}
+
+cmd_help() {
+    cat <<EOF
+cwp — Copilot With Profiles
+
+Usage:
+  cwp [copilot-args...]       Proxy to copilot with the profile for this directory
+  cwp init <profile>          Create a new empty profile
+  cwp --help                  Show this help
+  cwp --version               Show version
+
+Profile resolution:
+  cwp walks up from the current directory looking for a .copilot-profile file.
+  The file should contain:  profile = "my-profile-name"
+
+Config:
+  Profiles dir:   ${DEFAULT_PROFILES_DIR}
+  Global config:  ${GLOBAL_CONFIG}
+  Override profiles_dir in config.toml:  profiles_dir = "/custom/path"
+EOF
+}
+
+# --- Main ---
+
+main() {
+    # Handle built-in subcommands
+    case "${1:-}" in
+        init)
+            shift
+            cmd_init "$@"
+            exit 0
+            ;;
+        --help|-h)
+            cmd_help
+            exit 0
+            ;;
+        --version|-v)
+            cmd_version
+            exit 0
+            ;;
+    esac
+
+    # Find the .copilot-profile marker
+    local marker
+    if ! marker="$(find_marker)"; then
+        echo "Error: No $MARKER_FILE found in the current directory or any parent." >&2
+        echo "Create one with:  echo 'profile = \"my-profile\"' > .copilot-profile" >&2
+        exit 1
+    fi
+
+    # Parse the profile name from the marker
+    local profile_name
+    profile_name="$(parse_toml_value "$marker" "profile")"
+    if [[ -z "${profile_name:-}" ]]; then
+        echo "Error: $marker does not contain a 'profile' key." >&2
+        echo "Expected format:  profile = \"my-profile-name\"" >&2
+        exit 1
+    fi
+
+    # Resolve the profile directory
+    local profiles_dir profile_dir
+    profiles_dir="$(resolve_profiles_dir)"
+    profile_dir="$profiles_dir/$profile_name"
+
+    if [[ ! -d "$profile_dir" ]]; then
+        echo "Error: Profile '$profile_name' not found at: $profile_dir" >&2
+        echo "Create it with:  cwp init $profile_name" >&2
+        exit 1
+    fi
+
+    # Info output
+    echo "Using profile '$profile_name' (from $marker)" >&2
+    echo "Config dir: $profile_dir" >&2
+
+    # Transparent proxy to copilot
+    exec copilot --config-dir="$profile_dir" "$@"
+}
+
+main "$@"
