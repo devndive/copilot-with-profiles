@@ -154,6 +154,7 @@ main() {
     echo "Config dir: $profile_dir" >&2
 
     # Transparent proxy to copilot
+    export COPILOT_HOME="$profile_dir"
     exec copilot --config-dir="$profile_dir" "$@"
 }
 
